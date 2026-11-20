@@ -88,7 +88,8 @@ static struct gpio_callback button1_cb;   // Zephyr keeps a list of these per GP
 
 static volatile bool clockwise = true;   // shared between the interrupt and main()
 
-static volatile uint8_t speed = 400;  
+//data type should be int32 and not int8 as int 8 can only store max value of 256, compiler will not flag it buty it will silently introduce a bug 
+static volatile uint32_t  speed = 400;  
 
 
 // Runs in a THREAD (the system work queue), 30 ms after the last edge.
