@@ -85,20 +85,24 @@ static volatile bool clockwise = true;   // shared between the interrupt and mai
 
 
 
+// Runs in a THREAD (the system work queue), 30 ms after the last edge.
+// By then the contacts have settled, so the pin tells the truth.
+static void debounce_done(struct k_work *work)
+{
+    if (gpio_pin_get_dt(&button) == 1) {    // still held down -> a real press
+        clockwise = !clockwise;
+        printk("Direction: %s\n", clockwise ? "clockwise" : "anticlockwise");
+    }
+    // still released -> it was release bounce (or noise): ignore it
+}
+
+static K_WORK_DELAYABLE_DEFINE(debounce_work, debounce_done);
+
 // Runs in INTERRUPT context the moment the button is pressed: keep it short
 static void button_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
-    static int64_t last_ms;
-    int64_t now = k_uptime_get();
-
-    if (now - last_ms < 50) {   // ignore contact bounce: extra edges within 50 ms
-        return;
-    }
-    last_ms = now;
-
-
-clockwise = !clockwise;                  // flip the direction
-printk("Direction: %s\n", clockwise ? "clockwise" : "anticlockwise");
+    k_work_reschedule(&debounce_work, K_MSEC(30));   // (re)start the 30 ms countdown
+ 
 }
 
 int main(void)
