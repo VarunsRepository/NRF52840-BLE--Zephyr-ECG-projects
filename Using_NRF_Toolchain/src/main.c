@@ -80,15 +80,15 @@ static const struct gpio_dt_spec led3 = GPIO_DT_SPEC_GET(DT_ALIAS(led2), gpios);
 static const struct gpio_dt_spec button = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios);
 // button to change the speed  of LED circling
 static const struct gpio_dt_spec button1 = GPIO_DT_SPEC_GET(DT_ALIAS(sw1), gpios);
-
+// button to change the speed  of LED circling
+static const struct gpio_dt_spec button2 = GPIO_DT_SPEC_GET(DT_ALIAS(sw2), gpios);
 
 static struct gpio_callback button_cb;   // Zephyr keeps a list of these per GPIO port
 static struct gpio_callback button1_cb;   // Zephyr keeps a list of these per GPIO port
-
+static struct gpio_callback button2_cb;   // Zephyr keeps a list of these per GPIO port
 
 static volatile bool clockwise = true;   // shared between the interrupt and main()
 
-//data type should be int32 and not int8 as int 8 can only store max value of 256, compiler will not flag it buty it will silently introduce a bug 
 static volatile uint32_t  speed = 400;  
 
 
@@ -131,6 +131,29 @@ static void button1_pressed(const struct device *dev, struct gpio_callback *cb, 
     k_work_reschedule(&debounce1_work, K_MSEC(30));
 }
 
+
+
+// Runs in a THREAD (the system work queue), 30 ms after the last edge.
+// By then the contacts have settled, so the pin tells the truth.
+static void debounce2_done(struct k_work *work)
+{
+    if (gpio_pin_get_dt(&button2) == 1) {    // still held down -> a real press
+
+        speed = (speed < 400) ? speed * 2 : 400; 
+        
+        printk("speed decreased to : %u\n", speed);
+    }
+    // still released -> it was release bounce (or noise): ignore it
+}
+static K_WORK_DELAYABLE_DEFINE(debounce2_work, debounce2_done);
+
+static void button2_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
+{
+    k_work_reschedule(&debounce2_work, K_MSEC(30));
+}
+
+
+
 int main(void)
 {
 
@@ -142,7 +165,7 @@ int main(void)
     }
 
     // conditon to check if pushbutton(s) is not ready
-    if (!gpio_is_ready_dt(&button) || !gpio_is_ready_dt(&button1) ) {
+    if (!gpio_is_ready_dt(&button) || !gpio_is_ready_dt(&button1) || !gpio_is_ready_dt(&button2) ) {
         return -1;
     }
     
@@ -164,6 +187,16 @@ gpio_pin_interrupt_configure_dt(&button1, GPIO_INT_EDGE_TO_ACTIVE);
 // 3. tell Zephyr which function to call, for which pin
 gpio_init_callback(&button1_cb, button1_pressed, BIT(button1.pin));
 gpio_add_callback(button1.port, &button1_cb);
+
+
+
+// 1. make it an input (devicetree adds the pull-up and active-low)
+gpio_pin_configure_dt(&button2, GPIO_INPUT);
+// 2. fire an interrupt when it goes from released to pressed
+gpio_pin_interrupt_configure_dt(&button2, GPIO_INT_EDGE_TO_ACTIVE);
+// 3. tell Zephyr which function to call, for which pin
+gpio_init_callback(&button2_cb, button2_pressed, BIT(button2.pin));
+gpio_add_callback(button2.port, &button2_cb);
 
 
 
