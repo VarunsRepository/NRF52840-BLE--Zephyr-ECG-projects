@@ -75,15 +75,57 @@ static const struct gpio_dt_spec led1 = GPIO_DT_SPEC_GET(DT_ALIAS(led1), gpios);
 static const struct gpio_dt_spec led2 = GPIO_DT_SPEC_GET(DT_ALIAS(led3), gpios);
 static const struct gpio_dt_spec led3 = GPIO_DT_SPEC_GET(DT_ALIAS(led2), gpios);
 
+//struct for reading pushbutton on the NRF board 
+static const struct gpio_dt_spec button = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios);
+
+
+static struct gpio_callback button_cb;   // Zephyr keeps a list of these per GPIO port
+
+static volatile bool clockwise = true;   // shared between the interrupt and main()
+
+
+
+// Runs in INTERRUPT context the moment the button is pressed: keep it short
+static void button_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
+{
+    static int64_t last_ms;
+    int64_t now = k_uptime_get();
+
+    if (now - last_ms < 50) {   // ignore contact bounce: extra edges within 50 ms
+        return;
+    }
+    last_ms = now;
+
+
+clockwise = !clockwise;                  // flip the direction
+printk("Direction: %s\n", clockwise ? "clockwise" : "anticlockwise");
+}
+
 int main(void)
 {
 
-        // a simple if statement which ORs 4 LED pin statuses, 
-        // so if either of the LED is not ready to work, program exits with -1
-        if (!gpio_is_ready_dt(&led0) || !gpio_is_ready_dt(&led1) ||
+    // a simple if statement which ORs 4 LED pin statuses, 
+    // so if either of the LED is not ready to work, program exits with -1
+    if (!gpio_is_ready_dt(&led0) || !gpio_is_ready_dt(&led1) ||
         !gpio_is_ready_dt(&led2) || !gpio_is_ready_dt(&led3)) {
         return -1;
     }
+
+    // conditon to check if pushbutton is not ready
+    if (!gpio_is_ready_dt(&button) ) {
+        return -1;
+    }
+
+// 1. make it an input (devicetree adds the pull-up and active-low)
+gpio_pin_configure_dt(&button, GPIO_INPUT);
+// 2. fire an interrupt when it goes from released to pressed
+gpio_pin_interrupt_configure_dt(&button, GPIO_INT_EDGE_TO_ACTIVE);
+// 3. tell Zephyr which function to call, for which pin
+gpio_init_callback(&button_cb, button_pressed, BIT(button.pin));
+gpio_add_callback(button.port, &button_cb);
+
+
+
 
     // condition to check if the temp sensor is ready and servicable 
     if (!Temp_Sensor_Device_ptr || !device_is_ready(Temp_Sensor_Device_ptr)) {
@@ -117,6 +159,7 @@ int main(void)
     gpio_pin_configure_dt(&led2, GPIO_OUTPUT_INACTIVE);
     gpio_pin_configure_dt(&led3, GPIO_OUTPUT_INACTIVE);
 
+ 
     // our word that rotates a 1 between the 4 LSBs of the word
     uint8_t state = 0b00000001;
 
@@ -139,7 +182,7 @@ current_temp = sys_cpu_to_le16((int16_t)(temp.val1 * 100 + temp.val2 / 10000));
             printk("Failed to read temp\n");
         }
  
- 
+  
         // we're extracting state for each of the 4 LEDs individually by left shifting 1 and ANDinf with a 0x1(we only need the LSB)  
         gpio_pin_set_dt(&led0, state & (1 << 0));
         gpio_pin_set_dt(&led1, state & (1 << 1));
@@ -149,7 +192,13 @@ current_temp = sys_cpu_to_le16((int16_t)(temp.val1 * 100 + temp.val2 / 10000));
          // left shift by 1 bit 
          // and if the result is greater than 0b00010000 then change the result to 0b00000001
         // this is done to turn one one LED at a time for the NRF's 4 rotating LEDs          
-         state = (state < 0b00001000) ? (state << 1) : 0b00000001;
+        
+        if (clockwise) {
+    state = (state < 0b00001000) ? (state << 1) : 0b00000001;   // 1,2,4,8,1,...
+} else {
+    state = (state > 0b00000001) ? (state >> 1) : 0b00001000;   // 8,4,2,1,8,...
+}
+
         
 
         k_msleep(200);
