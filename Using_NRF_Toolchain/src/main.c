@@ -76,13 +76,19 @@ static const struct gpio_dt_spec led2 = GPIO_DT_SPEC_GET(DT_ALIAS(led3), gpios);
 static const struct gpio_dt_spec led3 = GPIO_DT_SPEC_GET(DT_ALIAS(led2), gpios);
 
 //struct for reading pushbutton on the NRF board 
+// button to change the direction of LED circling
 static const struct gpio_dt_spec button = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios);
+// button to change the speed  of LED circling
+static const struct gpio_dt_spec button1 = GPIO_DT_SPEC_GET(DT_ALIAS(sw1), gpios);
 
 
 static struct gpio_callback button_cb;   // Zephyr keeps a list of these per GPIO port
+static struct gpio_callback button1_cb;   // Zephyr keeps a list of these per GPIO port
+
 
 static volatile bool clockwise = true;   // shared between the interrupt and main()
 
+static volatile uint8_t speed = 400;  
 
 
 // Runs in a THREAD (the system work queue), 30 ms after the last edge.
@@ -102,7 +108,26 @@ static K_WORK_DELAYABLE_DEFINE(debounce_work, debounce_done);
 static void button_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
     k_work_reschedule(&debounce_work, K_MSEC(30));   // (re)start the 30 ms countdown
- 
+}
+
+
+// Runs in a THREAD (the system work queue), 30 ms after the last edge.
+// By then the contacts have settled, so the pin tells the truth.
+static void debounce1_done(struct k_work *work)
+{
+    if (gpio_pin_get_dt(&button1) == 1) {    // still held down -> a real press
+
+        speed = (speed > 25) ? speed / 2 : 200; 
+        
+        printk("speed increased to : %u\n", speed);
+    }
+    // still released -> it was release bounce (or noise): ignore it
+}
+static K_WORK_DELAYABLE_DEFINE(debounce1_work, debounce1_done);
+
+static void button1_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
+{
+    k_work_reschedule(&debounce1_work, K_MSEC(30));
 }
 
 int main(void)
@@ -115,10 +140,12 @@ int main(void)
         return -1;
     }
 
-    // conditon to check if pushbutton is not ready
-    if (!gpio_is_ready_dt(&button) ) {
+    // conditon to check if pushbutton(s) is not ready
+    if (!gpio_is_ready_dt(&button) || !gpio_is_ready_dt(&button1) ) {
         return -1;
     }
+    
+
 
 // 1. make it an input (devicetree adds the pull-up and active-low)
 gpio_pin_configure_dt(&button, GPIO_INPUT);
@@ -127,6 +154,15 @@ gpio_pin_interrupt_configure_dt(&button, GPIO_INT_EDGE_TO_ACTIVE);
 // 3. tell Zephyr which function to call, for which pin
 gpio_init_callback(&button_cb, button_pressed, BIT(button.pin));
 gpio_add_callback(button.port, &button_cb);
+
+
+// 1. make it an input (devicetree adds the pull-up and active-low)
+gpio_pin_configure_dt(&button1, GPIO_INPUT);
+// 2. fire an interrupt when it goes from released to pressed
+gpio_pin_interrupt_configure_dt(&button1, GPIO_INT_EDGE_TO_ACTIVE);
+// 3. tell Zephyr which function to call, for which pin
+gpio_init_callback(&button1_cb, button1_pressed, BIT(button1.pin));
+gpio_add_callback(button1.port, &button1_cb);
 
 
 
@@ -205,7 +241,7 @@ current_temp = sys_cpu_to_le16((int16_t)(temp.val1 * 100 + temp.val2 / 10000));
 
         
 
-        k_msleep(200);
+        k_msleep(speed);
     }
 
     return 0;
