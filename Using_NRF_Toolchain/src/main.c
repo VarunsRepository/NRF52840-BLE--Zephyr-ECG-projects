@@ -172,6 +172,16 @@ static void button2_pressed(const struct device *dev, struct gpio_callback *cb, 
     k_work_reschedule(&debounce2_work, K_MSEC(30));
 }
 
+// Turn the direction/speed buttons on or off (Button 4 stays on, always)
+static void set_control_buttons(bool enabled)
+{
+    gpio_flags_t mode = enabled ? GPIO_INT_EDGE_TO_ACTIVE : GPIO_INT_DISABLE;
+
+    gpio_pin_interrupt_configure_dt(&button, mode);
+    gpio_pin_interrupt_configure_dt(&button1, mode);
+    gpio_pin_interrupt_configure_dt(&button2, mode);
+}
+
 // Runs in a THREAD (the system work queue), 30 ms after the last edge.
 // By then the contacts have settled, so the pin tells the truth.
 static void debounce3_done(struct k_work *work)
@@ -182,18 +192,23 @@ static void debounce3_done(struct k_work *work)
 
         if (low_power)
         {
-            printk("Entering low-power mode\n");                     // say goodbye FIRST
-            k_timer_stop(&led_timer);                                // stop the LED callback
-            gpio_pin_set_dt(&led0, 0); /* ...and led1, led2, led3 */ // make sure they're all off
-            pm_device_action_run(console, PM_DEVICE_ACTION_SUSPEND); // switch the UART off
-            // low_power = true;
+            printk("Entering low-power mode\n");
+            set_control_buttons(false);              // buttons 1-3 ignored from now on
+            k_work_cancel_delayable(&debounce_work); // drop any press already in the pipeline
+            k_work_cancel_delayable(&debounce1_work);
+            k_work_cancel_delayable(&debounce2_work);
+            k_timer_stop(&led_timer); // the LED "interrupt" is the timer
+            gpio_pin_set_dt(&led0, 0);
+gpio_pin_set_dt(&led1, 0);
+gpio_pin_set_dt(&led2, 0);
+gpio_pin_set_dt(&led3, 0);
+            pm_device_action_run(console, PM_DEVICE_ACTION_SUSPEND);
         }
-
-        if (!low_power)
+        else
         {
-            pm_device_action_run(console, PM_DEVICE_ACTION_RESUME); // UART back on FIRST
-            // low_power = false;
-            k_timer_start(&led_timer, K_MSEC(speed), K_MSEC(speed)); // LEDs circling again
+            pm_device_action_run(console, PM_DEVICE_ACTION_RESUME);
+            k_timer_start(&led_timer, K_MSEC(speed), K_MSEC(speed));
+            set_control_buttons(true); // buttons 1-3 back
             printk("Back to USB mode\n");
         }
     }
@@ -289,7 +304,7 @@ int main(void)
     gpio_pin_configure_dt(&led3, GPIO_OUTPUT_INACTIVE);
 
     // our word that rotates a 1 between the 4 LSBs of the word
-    uint8_t state = 0b00000001;
+    // uint8_t state = 0b00000001;
 
     k_timer_start(&led_timer, K_MSEC(speed), K_MSEC(speed)); // first tick, then every tick
 
@@ -299,7 +314,7 @@ int main(void)
             sensor_channel_get(Temp_Sensor_Device_ptr, SENSOR_CHAN_DIE_TEMP, &temp) == 0)
         {
             // val1 = integer part, val2 = millionths (divide by 10000 for 2 decimal places)
-            printk("Die Temp: %d.%02d C\n", temp.val1, temp.val2 / 10000);
+           if (!low_power){ printk("Die Temp: %d.%02d C\n", temp.val1, temp.val2 / 10000);}
 
             current_temp = sys_cpu_to_le16((int16_t)(temp.val1 * 100 + temp.val2 / 10000));
 
@@ -310,7 +325,7 @@ int main(void)
         }
         else
         {
-            printk("Failed to read temp\n");
+            if (!low_power) { printk("Failed to read temp\n");}
         }
 
         //       // we're extracting state for each of the 4 LEDs individually by left shifting 1 and ANDinf with a 0x1(we only need the LSB)
