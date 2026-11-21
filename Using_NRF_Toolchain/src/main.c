@@ -10,6 +10,11 @@
 #include <zephyr/bluetooth/uuid.h> // holds the IDs, meaning the names of services and characteristics.
 #include <zephyr/sys/byteorder.h>  // byte order manipulation
 
+#include <zephyr/pm/device.h> // To get the UART device(to turn it off when we're Toggling  to low power mode)
+// code to get the actual UART DEVICE
+static const struct device *const console = DEVICE_DT_GET(DT_CHOSEN(zephyr_console));
+static volatile bool low_power;
+
 static int16_t current_temp; // Units of 0.01 C per BLE spec (0x2A6E)
 static bool notify_enabled;
 
@@ -72,15 +77,17 @@ static const struct gpio_dt_spec button = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios)
 static const struct gpio_dt_spec button1 = GPIO_DT_SPEC_GET(DT_ALIAS(sw1), gpios);
 // button to change the speed  of LED circling
 static const struct gpio_dt_spec button2 = GPIO_DT_SPEC_GET(DT_ALIAS(sw2), gpios);
+// button to change the speed  of LED circling
+static const struct gpio_dt_spec button3 = GPIO_DT_SPEC_GET(DT_ALIAS(sw3), gpios);
 
 static struct gpio_callback button_cb;  // Zephyr keeps a list of these per GPIO port
 static struct gpio_callback button1_cb; // Zephyr keeps a list of these per GPIO port
 static struct gpio_callback button2_cb; // Zephyr keeps a list of these per GPIO port
+static struct gpio_callback button3_cb; // Zephyr keeps a list of these per GPIO port
 
 static volatile bool clockwise = true; // shared between the interrupt and main()
 
 static volatile uint32_t speed = 400;
-
 
 // Runs every 'speed' ms, in INTERRUPT context (timer expiry): short and quick
 static void led_step(struct k_timer *timer)
@@ -132,7 +139,7 @@ static void debounce1_done(struct k_work *work)
     { // still held down -> a real press
 
         speed = (speed > 25) ? speed / 2 : 25;
-        k_timer_start(&led_timer, K_MSEC(speed), K_MSEC(speed));   // new speed takes effect NOW
+        k_timer_start(&led_timer, K_MSEC(speed), K_MSEC(speed)); // new speed takes effect NOW
 
         printk("speed increased to : %u\n", speed);
     }
@@ -153,7 +160,7 @@ static void debounce2_done(struct k_work *work)
     { // still held down -> a real press
 
         speed = (speed < 400) ? speed * 2 : 400;
-        k_timer_start(&led_timer, K_MSEC(speed), K_MSEC(speed));   // new speed takes effect NOW//
+        k_timer_start(&led_timer, K_MSEC(speed), K_MSEC(speed)); // new speed takes effect NOW//
         printk("speed decreased to : %u\n", speed);
     }
     // still released -> it was release bounce (or noise): ignore it
@@ -165,6 +172,39 @@ static void button2_pressed(const struct device *dev, struct gpio_callback *cb, 
     k_work_reschedule(&debounce2_work, K_MSEC(30));
 }
 
+// Runs in a THREAD (the system work queue), 30 ms after the last edge.
+// By then the contacts have settled, so the pin tells the truth.
+static void debounce3_done(struct k_work *work)
+{
+    if (gpio_pin_get_dt(&button3) == 1)
+    { // still held down -> a real press
+        low_power = !low_power;
+
+        if (low_power)
+        {
+            printk("Entering low-power mode\n");                     // say goodbye FIRST
+            k_timer_stop(&led_timer);                                // stop the LED callback
+            gpio_pin_set_dt(&led0, 0); /* ...and led1, led2, led3 */ // make sure they're all off
+            pm_device_action_run(console, PM_DEVICE_ACTION_SUSPEND); // switch the UART off
+            // low_power = true;
+        }
+
+        if (!low_power)
+        {
+            pm_device_action_run(console, PM_DEVICE_ACTION_RESUME); // UART back on FIRST
+            // low_power = false;
+            k_timer_start(&led_timer, K_MSEC(speed), K_MSEC(speed)); // LEDs circling again
+            printk("Back to USB mode\n");
+        }
+    }
+    // still released -> it was release bounce (or noise): igno re it
+}
+static K_WORK_DELAYABLE_DEFINE(debounce3_work, debounce3_done);
+
+static void button3_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
+{
+    k_work_reschedule(&debounce3_work, K_MSEC(30));
+}
 
 int main(void)
 {
@@ -178,7 +218,8 @@ int main(void)
     }
 
     // conditon to check if pushbutton(s) is not ready
-    if (!gpio_is_ready_dt(&button) || !gpio_is_ready_dt(&button1) || !gpio_is_ready_dt(&button2))
+    if (!gpio_is_ready_dt(&button) || !gpio_is_ready_dt(&button1) ||
+        !gpio_is_ready_dt(&button2) || !gpio_is_ready_dt(&button3))
     {
         return -1;
     }
@@ -206,6 +247,14 @@ int main(void)
     // 3. tell Zephyr which function to call, for which pin
     gpio_init_callback(&button2_cb, button2_pressed, BIT(button2.pin));
     gpio_add_callback(button2.port, &button2_cb);
+
+    // 1. make it an input (devicetree adds the pull-up and active-low)
+    gpio_pin_configure_dt(&button3, GPIO_INPUT);
+    // 2. fire an interrupt when it goes from released to pressed
+    gpio_pin_interrupt_configure_dt(&button3, GPIO_INT_EDGE_TO_ACTIVE);
+    // 3. tell Zephyr which function to call, for which pin
+    gpio_init_callback(&button3_cb, button3_pressed, BIT(button3.pin));
+    gpio_add_callback(button3.port, &button3_cb);
 
     // condition to check if the temp sensor is ready and servicable
     if (!Temp_Sensor_Device_ptr || !device_is_ready(Temp_Sensor_Device_ptr))
@@ -264,24 +313,24 @@ int main(void)
             printk("Failed to read temp\n");
         }
 
-//       // we're extracting state for each of the 4 LEDs individually by left shifting 1 and ANDinf with a 0x1(we only need the LSB)
-//       gpio_pin_set_dt(&led0, state & (1 << 0));
-//       gpio_pin_set_dt(&led1, state & (1 << 1));
-//       gpio_pin_set_dt(&led2, state & (1 << 2));
-//       gpio_pin_set_dt(&led3, state & (1 << 3));
-//
-//       // left shift by 1 bit
-//       // and if the result is greater than 0b00010000 then change the result to 0b00000001
-//       // this is done to turn one one LED at a time for the NRF's 4 rotating LEDs
-//
-//       if (clockwise)
-//       {
-//           state = (state < 0b00001000) ? (state << 1) : 0b00000001; // 1,2,4,8,1,...
-//       }
-//       else
-//       {
-//           state = (state > 0b00000001) ? (state >> 1) : 0b00001000; // 8,4,2,1,8,...
-//       }
+        //       // we're extracting state for each of the 4 LEDs individually by left shifting 1 and ANDinf with a 0x1(we only need the LSB)
+        //       gpio_pin_set_dt(&led0, state & (1 << 0));
+        //       gpio_pin_set_dt(&led1, state & (1 << 1));
+        //       gpio_pin_set_dt(&led2, state & (1 << 2));
+        //       gpio_pin_set_dt(&led3, state & (1 << 3));
+        //
+        //       // left shift by 1 bit
+        //       // and if the result is greater than 0b00010000 then change the result to 0b00000001
+        //       // this is done to turn one one LED at a time for the NRF's 4 rotating LEDs
+        //
+        //       if (clockwise)
+        //       {
+        //           state = (state < 0b00001000) ? (state << 1) : 0b00000001; // 1,2,4,8,1,...
+        //       }
+        //       else
+        //       {
+        //           state = (state > 0b00000001) ? (state >> 1) : 0b00001000; // 8,4,2,1,8,...
+        //       }
 
         k_msleep(1000);
     }
